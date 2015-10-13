@@ -447,7 +447,7 @@ blockToHtml opts (Para [Image txt (s,'f':'i':'g':':':tit)]) = do
                     [nl opts, img, nl opts, capt, nl opts]
 blockToHtml opts (Para lst) = do
   contents <- inlineListToHtml opts lst
-  return $ H.p contents
+  return $ contents <> H.br <> H.br
 blockToHtml opts (Div attr@(_,classes,_) bs) = do
   let speakerNotes = "notes" `elem` classes
   -- we don't want incremental output inside speaker notes, see #1394
@@ -522,12 +522,12 @@ blockToHtml opts (Header level attr@(_,classes,_) lst) = do
   inElement <- gets stElement
   return $ (if inElement then id else addAttrs opts attr)
          $ case level of
-              1 -> H.h1 contents'
-              2 -> H.h2 contents'
-              3 -> H.h3 contents'
-              4 -> H.h4 contents'
-              5 -> H.h5 contents'
-              6 -> H.h6 contents'
+              1 -> H.h1 contents' <> H.br 
+              2 -> H.h2 contents' <> H.br
+              3 -> H.h3 contents' <> H.br
+              4 -> H.h4 contents' <> H.br
+              5 -> H.h5 contents' <> H.br
+              6 -> H.h6 contents' <> H.br
               _ -> H.p contents'
 blockToHtml opts (BulletList lst) = do
   contents <- mapM (blockListToHtml opts) lst
