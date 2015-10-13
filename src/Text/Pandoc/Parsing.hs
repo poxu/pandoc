@@ -178,7 +178,7 @@ import Text.Parsec hiding (token)
 import Text.Parsec.Pos (newPos)
 import Data.Char ( toLower, toUpper, ord, chr, isAscii, isAlphaNum,
                    isHexDigit, isSpace )
-import Data.List ( intercalate, transpose )
+import Data.List ( intercalate, transpose, isSuffixOf )
 import Text.Pandoc.Shared
 import qualified Data.Map as M
 import Text.TeXMath.Readers.TeX.Macros (applyMacros, Macro,
@@ -448,13 +448,12 @@ uri :: Stream [Char] m Char => ParserT [Char] st m (String, String)
 uri = try $ do
   scheme <- uriScheme
   char ':'
-  -- We allow punctuation except at the end, since
+  -- We allow sentence punctuation except at the end, since
   -- we don't want the trailing '.' in 'http://google.com.' We want to allow
   -- http://en.wikipedia.org/wiki/State_of_emergency_(disambiguation)
   -- as a URL, while NOT picking up the closing paren in
   -- (http://wikipedia.org). So we include balanced parens in the URL.
-  let isWordChar c = isAlphaNum c || c == '_' || c == '/' || c == '+' ||
-                         not (isAscii c)
+  let isWordChar c = isAlphaNum c || c `elem` "#$%*+/@\\_-"
   let wordChar = satisfy isWordChar
   let percentEscaped = try $ char '%' >> skipMany1 (satisfy isHexDigit)
   let entity = () <$ characterReference
@@ -1064,7 +1063,9 @@ type NoteTable' = [(String, F Blocks)]  -- used in markdown reader
 newtype Key = Key String deriving (Show, Read, Eq, Ord)
 
 toKey :: String -> Key
-toKey = Key . map toLower . unwords . words
+toKey = Key . map toLower . unwords . words . unbracket
+  where unbracket ('[':xs) | "]" `isSuffixOf` xs = take (length xs - 1) xs
+        unbracket xs       = xs
 
 type KeyTable = M.Map Key Target
 

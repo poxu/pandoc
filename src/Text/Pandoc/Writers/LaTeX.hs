@@ -38,13 +38,14 @@ import Text.Pandoc.Options
 import Text.Pandoc.Templates
 import Text.Printf ( printf )
 import Network.URI ( isURI, unEscapeString )
-import Data.List ( (\\), isSuffixOf, isInfixOf, stripPrefix,
-                   isPrefixOf, intercalate, intersperse )
+import Data.Aeson (object, (.=))
+import Data.List ( (\\), isInfixOf, stripPrefix, intercalate, intersperse )
 import Data.Char ( toLower, isPunctuation, isAscii, isLetter, isDigit, ord )
 import Data.Maybe ( fromMaybe )
-import Data.Aeson.Types ( (.:), parseMaybe, withObject )
+import qualified Data.Text as T
 import Control.Applicative ((<|>))
 import Control.Monad.State
+import qualified Text.Parsec as P
 import Text.Pandoc.Pretty
 import Text.Pandoc.Slides
 import Text.Pandoc.Highlighting (highlight, styleToLaTeX,
@@ -111,13 +112,20 @@ pandocToLaTeX options (Pandoc meta blocks) = do
               (fmap (render colwidth) . inlineListToLaTeX)
               meta
   let bookClasses = ["memoir","book","report","scrreprt","scrbook"]
+  let documentClass = case P.parse (do P.skipMany (P.satisfy (/='\\'))
+                                       P.string "\\documentclass"
+                                       P.skipMany (P.satisfy (/='{'))
+                                       P.char '{'
+                                       P.manyTill P.letter (P.char '}')) "template"
+                              template of
+                              Right r -> r
+                              Left _  -> ""
   case lookup "documentclass" (writerVariables options) `mplus`
-        parseMaybe (withObject "object" (.: "documentclass")) metadata of
+        fmap stringify (lookupMeta "documentclass" meta) of
          Just x  | x `elem` bookClasses -> modify $ \s -> s{stBook = True}
                  | otherwise            -> return ()
-         Nothing | any (\x -> "\\documentclass" `isPrefixOf` x &&
-                          (any (`isSuffixOf` x) bookClasses))
-                          (lines template) -> modify $ \s -> s{stBook = True}
+         Nothing | documentClass `elem` bookClasses
+                                        -> modify $ \s -> s{stBook = True}
                  | otherwise               -> return ()
   -- check for \usepackage...{csquotes}; if present, we'll use
   -- \enquote{...} for smart quotes:
@@ -137,11 +145,6 @@ pandocToLaTeX options (Pandoc meta blocks) = do
   st <- get
   titleMeta <- stringToLaTeX TextString $ stringify $ docTitle meta
   authorsMeta <- mapM (stringToLaTeX TextString . stringify) $ docAuthors meta
-  let (mainlang, otherlang) =
-       case (reverse . splitBy (==',') . filter (/=' ')) `fmap`
-            getField "lang" metadata of
-              Just (m:os) -> (m, reverse os)
-              _           -> ("", [])
   let context  =  defField "toc" (writerTableOfContents options) $
                   defField "toc-depth" (show (writerTOCDepth options -
                                               if stBook st
@@ -166,8 +169,6 @@ pandocToLaTeX options (Pandoc meta blocks) = do
                   defField "euro" (stUsesEuro st) $
                   defField "listings" (writerListings options || stLHS st) $
                   defField "beamer" (writerBeamer options) $
-                  defField "mainlang" mainlang $
-                  defField "otherlang" otherlang $
                   (if stHighlighting st
                       then defField "highlighting-macros" (styleToLaTeX
                                 $ writerHighlightStyle options )
@@ -179,8 +180,23 @@ pandocToLaTeX options (Pandoc meta blocks) = do
                                      defField "biblatex" True
                          _        -> id) $
                   metadata
+  let toPolyObj lang = object [ "name"    .= T.pack name
+                              , "options" .= T.pack opts ]
+        where
+          (name, opts) = toPolyglossia lang
+  let lang = maybe [] (splitBy (=='-')) $ getField "lang" context
+  let context' =
+          defField "babel-lang" (toBabel lang)
+        $ defField "polyglossia-lang" (toPolyObj lang)
+        $ defField "polyglossia-otherlangs"
+            (maybe [] (map $ toPolyObj . splitBy (=='-')) $
+            getField "otherlangs" context)
+        $ defField "latex-dir-rtl" (case (getField "dir" context)::Maybe String of
+                                      Just "rtl" -> True
+                                      _          -> False)
+        $ context
   return $ if writerStandalone options
-              then renderTemplate' template context
+              then renderTemplate' template context'
               else main
 
 -- | Convert Elements to LaTeX
@@ -226,7 +242,7 @@ stringToLaTeX  ctx (x:xs) = do
        '^' -> "\\^{}" ++ rest
        '\\'| isUrl     -> '/' : rest  -- NB. / works as path sep even on Windows
            | otherwise -> "\\textbackslash{}" ++ rest
-       '|' -> "\\textbar{}" ++ rest
+       '|' | not isUrl -> "\\textbar{}" ++ rest
        '<' -> "\\textless{}" ++ rest
        '>' -> "\\textgreater{}" ++ rest
        '[' -> "{[}" ++ rest  -- to avoid interpretation as
@@ -314,14 +330,19 @@ isLineBreakOrSpace _ = False
 blockToLaTeX :: Block     -- ^ Block to convert
              -> State WriterState Doc
 blockToLaTeX Null = return empty
-blockToLaTeX (Div (identifier,classes,_) bs) = do
+blockToLaTeX (Div (identifier,classes,kvs) bs) = do
   beamer <- writerBeamer `fmap` gets stOptions
   ref <- toLabel identifier
   let linkAnchor = if null identifier
                       then empty
                       else "\\hyperdef{}" <> braces (text ref) <>
                            braces ("\\label" <> braces (text ref))
-  contents <- blockListToLaTeX bs
+  contents' <- blockListToLaTeX bs
+  let align dir = inCmd "begin" dir $$ contents' $$ inCmd "end" dir
+  let contents = case lookup "dir" kvs of
+                   Just "rtl" -> align "RTL"
+                   Just "ltr" -> align "LTR"
+                   _          -> contents'
   if beamer && "notes" `elem` classes  -- speaker notes
      then return $ "\\note" <> braces contents
      else return (linkAnchor $$ contents)
@@ -718,10 +739,12 @@ isQuoted _ = False
 -- | Convert inline element to LaTeX
 inlineToLaTeX :: Inline    -- ^ Inline to convert
               -> State WriterState Doc
-inlineToLaTeX (Span (id',classes,_) ils) = do
+inlineToLaTeX (Span (id',classes,kvs) ils) = do
   let noEmph = "csl-no-emph" `elem` classes
   let noStrong = "csl-no-strong" `elem` classes
   let noSmallCaps = "csl-no-smallcaps" `elem` classes
+  let rtl = ("dir","rtl") `elem` kvs
+  let ltr = ("dir","ltr") `elem` kvs
   ref <- toLabel id'
   let linkAnchor = if null id'
                       then empty
@@ -731,7 +754,9 @@ inlineToLaTeX (Span (id',classes,_) ils) = do
     ((if noEmph then inCmd "textup" else id) .
      (if noStrong then inCmd "textnormal" else id) .
      (if noSmallCaps then inCmd "textnormal" else id) .
-     (if not (noEmph || noStrong || noSmallCaps)
+     (if rtl then inCmd "RL" else id) .
+     (if ltr then inCmd "LR" else id) .
+     (if not (noEmph || noStrong || noSmallCaps || rtl || ltr)
          then braces
          else id)) `fmap` inlineListToLaTeX ils
 inlineToLaTeX (Emph lst) =
@@ -823,17 +848,17 @@ inlineToLaTeX (Link txt (src, _)) =
   case txt of
         [Str x] | escapeURI x == src ->  -- autolink
              do modify $ \s -> s{ stUrl = True }
-                src' <- stringToLaTeX URLString src
+                src' <- stringToLaTeX URLString (escapeURI src)
                 return $ text $ "\\url{" ++ src' ++ "}"
         [Str x] | Just rest <- stripPrefix "mailto:" src,
                   escapeURI x == rest -> -- email autolink
              do modify $ \s -> s{ stUrl = True }
-                src' <- stringToLaTeX URLString src
+                src' <- stringToLaTeX URLString (escapeURI src)
                 contents <- inlineListToLaTeX txt
                 return $ "\\href" <> braces (text src') <>
                    braces ("\\nolinkurl" <> braces contents)
         _ -> do contents <- inlineListToLaTeX txt
-                src' <- stringToLaTeX URLString src
+                src' <- stringToLaTeX URLString (escapeURI src)
                 return $ text ("\\href{" ++ src' ++ "}{") <>
                          contents <> char '}'
 inlineToLaTeX (Image _ (source, _)) = do
@@ -841,7 +866,7 @@ inlineToLaTeX (Image _ (source, _)) = do
   let source' = if isURI source
                    then source
                    else unEscapeString source
-  source'' <- stringToLaTeX URLString source'
+  source'' <- stringToLaTeX URLString (escapeURI source')
   inHeading <- gets stInHeading
   return $
     (if inHeading then "\\protect\\includegraphics" else "\\includegraphics")
@@ -973,3 +998,144 @@ citationsToBiblatex _ = return empty
 getListingsLanguage :: [String] -> Maybe String
 getListingsLanguage [] = Nothing
 getListingsLanguage (x:xs) = toListingsLanguage x <|> getListingsLanguage xs
+
+-- Takes a list of the constituents of a BCP 47 language code and
+-- converts it to a Polyglossia (language, options) tuple
+-- http://mirrors.concertpass.com/tex-archive/macros/latex/contrib/polyglossia/polyglossia.pdf
+toPolyglossia :: [String] -> (String, String)
+toPolyglossia ("ar":"DZ":_)        = ("arabic", "locale=algeria")
+toPolyglossia ("ar":"IQ":_)        = ("arabic", "locale=mashriq")
+toPolyglossia ("ar":"JO":_)        = ("arabic", "locale=mashriq")
+toPolyglossia ("ar":"LB":_)        = ("arabic", "locale=mashriq")
+toPolyglossia ("ar":"LY":_)        = ("arabic", "locale=libya")
+toPolyglossia ("ar":"MA":_)        = ("arabic", "locale=morocco")
+toPolyglossia ("ar":"MR":_)        = ("arabic", "locale=mauritania")
+toPolyglossia ("ar":"PS":_)        = ("arabic", "locale=mashriq")
+toPolyglossia ("ar":"SY":_)        = ("arabic", "locale=mashriq")
+toPolyglossia ("ar":"TN":_)        = ("arabic", "locale=tunisia")
+toPolyglossia ("de":"1901":_)      = ("german", "spelling=old")
+toPolyglossia ("de":"AT":"1901":_) = ("german", "variant=austrian, spelling=old")
+toPolyglossia ("de":"AT":_)        = ("german", "variant=austrian")
+toPolyglossia ("de":"CH":_)        = ("german", "variant=swiss")
+toPolyglossia ("de":_)             = ("german", "")
+toPolyglossia ("dsb":_)            = ("lsorbian", "")
+toPolyglossia ("el":"poly":_)      = ("greek",   "variant=poly")
+toPolyglossia ("en":"AU":_)        = ("english", "variant=australian")
+toPolyglossia ("en":"CA":_)        = ("english", "variant=canadian")
+toPolyglossia ("en":"GB":_)        = ("english", "variant=british")
+toPolyglossia ("en":"NZ":_)        = ("english", "variant=newzealand")
+toPolyglossia ("en":"UK":_)        = ("english", "variant=british")
+toPolyglossia ("en":"US":_)        = ("english", "variant=american")
+toPolyglossia ("grc":_)            = ("greek",   "variant=ancient")
+toPolyglossia ("hsb":_)            = ("usorbian", "")
+toPolyglossia ("sl":_)             = ("slovenian", "")
+toPolyglossia x                    = (commonFromBcp47 x, "")
+
+-- Takes a list of the constituents of a BCP 47 language code and
+-- converts it to a Babel language string.
+-- http://mirrors.concertpass.com/tex-archive/macros/latex/required/babel/base/babel.pdf
+-- Note that the PDF unfortunately does not contain a complete list of supported languages.
+toBabel :: [String] -> String
+toBabel ("de":"1901":_)      = "german"
+toBabel ("de":"AT":"1901":_) = "austrian"
+toBabel ("de":"AT":_)        = "naustrian"
+toBabel ("de":_)             = "ngerman"
+toBabel ("dsb":_)            = "lowersorbian"
+toBabel ("el":"poly":_)      = "polutonikogreek"
+toBabel ("en":"AU":_)        = "australian"
+toBabel ("en":"CA":_)        = "canadian"
+toBabel ("en":"GB":_)        = "british"
+toBabel ("en":"NZ":_)        = "newzealand"
+toBabel ("en":"UK":_)        = "british"
+toBabel ("en":"US":_)        = "american"
+toBabel ("fr":"CA":_)        = "canadien"
+toBabel ("fra":"aca":_)      = "acadian"
+toBabel ("grc":_)            = "polutonikogreek"
+toBabel ("hsb":_)            = "uppersorbian"
+toBabel ("sl":_)             = "slovene"
+toBabel x                    = commonFromBcp47 x
+
+-- Takes a list of the constituents of a BCP 47 language code
+-- and converts it to a string shared by Babel and Polyglossia.
+-- https://tools.ietf.org/html/bcp47#section-2.1
+commonFromBcp47 :: [String] -> String
+commonFromBcp47 [] = ""
+commonFromBcp47 ("pt":"BR":_) = "brazilian"
+commonFromBcp47 x = fromIso $ head x
+  where
+    fromIso "af"  = "afrikaans"
+    fromIso "am"  = "amharic"
+    fromIso "ar"  = "arabic"
+    fromIso "ast" = "asturian"
+    fromIso "bg"  = "bulgarian"
+    fromIso "bn"  = "bengali"
+    fromIso "bo"  = "tibetan"
+    fromIso "br"  = "breton"
+    fromIso "ca"  = "catalan"
+    fromIso "cy"  = "welsh"
+    fromIso "cz"  = "czech"
+    fromIso "cop" = "coptic"
+    fromIso "da"  = "danish"
+    fromIso "dv"  = "divehi"
+    fromIso "el"  = "greek"
+    fromIso "en"  = "english"
+    fromIso "eo"  = "esperanto"
+    fromIso "es"  = "spanish"
+    fromIso "et"  = "estonian"
+    fromIso "eu"  = "basque"
+    fromIso "fa"  = "farsi"
+    fromIso "fi"  = "finnish"
+    fromIso "fr"  = "french"
+    fromIso "fur" = "friulan"
+    fromIso "ga"  = "irish"
+    fromIso "gd"  = "scottish"
+    fromIso "gl"  = "galician"
+    fromIso "he"  = "hebrew"
+    fromIso "hi"  = "hindi"
+    fromIso "hr"  = "croatian"
+    fromIso "hy"  = "armenian"
+    fromIso "hu"  = "magyar"
+    fromIso "ia"  = "interlingua"
+    fromIso "id"  = "indonesian"
+    fromIso "ie"  = "interlingua"
+    fromIso "is"  = "icelandic"
+    fromIso "it"  = "italian"
+    fromIso "jp"  = "japanese"
+    fromIso "km"  = "khmer"
+    fromIso "kn"  = "kannada"
+    fromIso "ko"  = "korean"
+    fromIso "la"  = "latin"
+    fromIso "lo"  = "lao"
+    fromIso "lt"  = "lithuanian"
+    fromIso "lv"  = "latvian"
+    fromIso "ml"  = "malayalam"
+    fromIso "mn"  = "mongolian"
+    fromIso "mr"  = "marathi"
+    fromIso "nb"  = "norsk"
+    fromIso "nl"  = "dutch"
+    fromIso "nn"  = "nynorsk"
+    fromIso "no"  = "norsk"
+    fromIso "nqo" = "nko"
+    fromIso "oc"  = "occitan"
+    fromIso "pl"  = "polish"
+    fromIso "pms" = "piedmontese"
+    fromIso "pt"  = "portuguese"
+    fromIso "rm"  = "romansh"
+    fromIso "ro"  = "romanian"
+    fromIso "ru"  = "russian"
+    fromIso "sa"  = "sanskrit"
+    fromIso "se"  = "samin"
+    fromIso "sk"  = "slovak"
+    fromIso "sq"  = "albanian"
+    fromIso "sr"  = "serbian"
+    fromIso "sv"  = "swedish"
+    fromIso "syr" = "syriac"
+    fromIso "ta"  = "tamil"
+    fromIso "te"  = "telugu"
+    fromIso "th"  = "thai"
+    fromIso "tk"  = "turkmen"
+    fromIso "tr"  = "turkish"
+    fromIso "uk"  = "ukrainian"
+    fromIso "ur"  = "urdu"
+    fromIso "vi"  = "vietnamese"
+    fromIso _     = ""

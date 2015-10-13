@@ -503,9 +503,15 @@ block = do
 header :: MarkdownParser (F Blocks)
 header = setextHeader <|> atxHeader <?> "header"
 
+atxChar :: MarkdownParser Char
+atxChar = do
+  exts <- getOption readerExtensions
+  return $ if Set.member Ext_literate_haskell exts
+    then '=' else '#'
+
 atxHeader :: MarkdownParser (F Blocks)
 atxHeader = try $ do
-  level <- many1 (char '#') >>= return . length
+  level <- atxChar >>= many1 . char >>= return . length
   notFollowedBy $ guardEnabled Ext_fancy_lists >>
                   (char '.' <|> char ')') -- this would be a list
   skipSpaces
@@ -521,7 +527,7 @@ atxClosing :: MarkdownParser Attr
 atxClosing = try $ do
   attr' <- option nullAttr
              (guardEnabled Ext_mmd_header_identifiers >> mmdHeaderIdentifier)
-  skipMany (char '#')
+  skipMany . char =<< atxChar
   skipSpaces
   attr <- option attr'
              (guardEnabled Ext_header_attributes >> attributes)
@@ -547,6 +553,7 @@ setextHeader = try $ do
   -- This lookahead prevents us from wasting time parsing Inlines
   -- unless necessary -- it gives a significant performance boost.
   lookAhead $ anyLine >> many1 (oneOf setextHChars) >> blankline
+  skipSpaces
   (text, raw) <- withRaw $
        trimInlinesF . mconcat <$> many1 (notFollowedBy setextHeaderEnd >> inline)
   attr <- setextHeaderEnd
@@ -632,7 +639,11 @@ keyValAttr = try $ do
   val <- enclosed (char '"') (char '"') litChar
      <|> enclosed (char '\'') (char '\'') litChar
      <|> many (escapedChar' <|> noneOf " \t\n\r}")
-  return $ \(id',cs,kvs) -> (id',cs,kvs ++ [(key,val)])
+  return $ \(id',cs,kvs) ->
+    case key of
+         "id"    -> (val,cs,kvs)
+         "class" -> (id',cs ++ words val,kvs)
+         _       -> (id',cs,kvs ++ [(key,val)])
 
 specialAttr :: MarkdownParser (Attr -> Attr)
 specialAttr = do
@@ -1326,6 +1337,8 @@ pipeBreak = try $ do
 
 pipeTable :: MarkdownParser ([Alignment], [Double], F [Blocks], F [[Blocks]])
 pipeTable = try $ do
+  nonindentSpaces
+  lookAhead nonspaceChar
   (heads,aligns) <- (,) <$> pipeTableRow <*> pipeBreak
   lines' <-  sequence <$> many pipeTableRow
   let widths = replicate (length aligns) 0.0
@@ -1339,7 +1352,7 @@ sepPipe = try $ do
 -- parse a row, also returning probable alignments for org-table cells
 pipeTableRow :: MarkdownParser (F [Blocks])
 pipeTableRow = do
-  nonindentSpaces
+  skipMany spaceChar
   openPipe <- (True <$ char '|') <|> return False
   let cell = mconcat <$>
                  many (notFollowedBy (blankline <|> char '|') >> inline)
@@ -1648,7 +1661,7 @@ endline = try $ do
   notFollowedBy (inList >> listStart)
   guardDisabled Ext_lists_without_preceding_blankline <|> notFollowedBy listStart
   guardEnabled Ext_blank_before_blockquote <|> notFollowedBy emailBlockQuoteStart
-  guardEnabled Ext_blank_before_header <|> notFollowedBy (char '#') -- atx header
+  guardEnabled Ext_blank_before_header <|> (notFollowedBy . char =<< atxChar) -- atx header
   guardDisabled Ext_backtick_code_blocks <|>
      notFollowedBy (() <$ (lookAhead (char '`') >> codeBlockFenced))
   notFollowedByHtmlCloser
@@ -1752,12 +1765,14 @@ dropBrackets = reverse . dropRB . reverse . dropLB
 bareURL :: MarkdownParser (F Inlines)
 bareURL = try $ do
   guardEnabled Ext_autolink_bare_uris
+  getState >>= guard . stateAllowLinks
   (orig, src) <- uri <|> emailAddress
   notFollowedBy $ try $ spaces >> htmlTag (~== TagClose "a")
   return $ return $ B.link src "" (B.str orig)
 
 autoLink :: MarkdownParser (F Inlines)
 autoLink = try $ do
+  getState >>= guard . stateAllowLinks
   char '<'
   (orig, src) <- uri <|> emailAddress
   -- in rare cases, something may remain after the uri parser

@@ -67,6 +67,7 @@ module Text.Pandoc
                , Reader (..)
                , mkStringReader
                , readDocx
+               , readOdt
                , readMarkdown
                , readCommonMark
                , readMediaWiki
@@ -85,7 +86,7 @@ module Text.Pandoc
                , readTxt2TagsNoMacros
                , readEPUB
                -- * Writers: converting /from/ Pandoc format
-               , Writer (..)
+              , Writer (..)
                , writeNative
                , writeJSON
                , writeMarkdown
@@ -118,12 +119,11 @@ module Text.Pandoc
                , writeCustom
                -- * Rendering templates and default templates
                , module Text.Pandoc.Templates
-               -- * Version
-               , pandocVersion
                -- * Miscellaneous
                , getReader
                , getWriter
                , ToJsonFilter(..)
+               , pandocVersion
              ) where
 
 import Text.Pandoc.Definition
@@ -143,6 +143,7 @@ import Text.Pandoc.Readers.Native
 import Text.Pandoc.Readers.Haddock
 import Text.Pandoc.Readers.TWiki
 import Text.Pandoc.Readers.Docx
+import Text.Pandoc.Readers.Odt
 import Text.Pandoc.Readers.Txt2Tags
 import Text.Pandoc.Readers.EPUB
 import Text.Pandoc.Writers.Native
@@ -173,23 +174,17 @@ import Text.Pandoc.Writers.CommonMark
 import Text.Pandoc.Writers.Custom
 import Text.Pandoc.Templates
 import Text.Pandoc.Options
-import Text.Pandoc.Shared (safeRead, warn, mapLeft)
+import Text.Pandoc.Shared (safeRead, warn, mapLeft, pandocVersion)
 import Text.Pandoc.MediaBag (MediaBag)
 import Text.Pandoc.Error
 import Data.Aeson
 import qualified Data.ByteString.Lazy as BL
 import Data.List (intercalate)
-import Data.Version (showVersion)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Text.Parsec
 import Text.Parsec.Error
 import qualified Text.Pandoc.UTF8 as UTF8
-import Paths_pandoc (version)
-
--- | Version number of pandoc library.
-pandocVersion :: String
-pandocVersion = showVersion version
 
 parseFormatSpec :: String
                 -> Either ParseError (String, Set Extension -> Set Extension)
@@ -250,6 +245,7 @@ readers = [ ("native"       , StringReader $ \_ s -> return $ readNative s)
            ,("haddock"      , mkStringReader readHaddock)
            ,("twiki"        , mkStringReader readTWiki)
            ,("docx"         , mkBSReader readDocx)
+           ,("odt"          , mkBSReader readOdt)
            ,("t2t"          , mkStringReader readTxt2TagsNoMacros)
            ,("epub"         , mkBSReader readEPUB)
            ]
@@ -321,14 +317,14 @@ getDefaultExtensions "markdown_mmd" = multimarkdownExtensions
 getDefaultExtensions "markdown_github" = githubMarkdownExtensions
 getDefaultExtensions "markdown"        = pandocExtensions
 getDefaultExtensions "plain"           = plainExtensions
-getDefaultExtensions "org"             = Set.fromList [Ext_citations]
+getDefaultExtensions "org"             = Set.fromList [Ext_citations,
+                                                       Ext_auto_identifiers]
 getDefaultExtensions "textile"         = Set.fromList [Ext_auto_identifiers]
 getDefaultExtensions "html"            = Set.fromList [Ext_auto_identifiers,
                                                        Ext_native_divs,
                                                        Ext_native_spans]
 getDefaultExtensions "html5"           = getDefaultExtensions "html"
-getDefaultExtensions "epub"            = Set.fromList [Ext_auto_identifiers,
-                                                       Ext_raw_html,
+getDefaultExtensions "epub"            = Set.fromList [Ext_raw_html,
                                                        Ext_native_divs,
                                                        Ext_native_spans,
                                                        Ext_epub_html_exts]

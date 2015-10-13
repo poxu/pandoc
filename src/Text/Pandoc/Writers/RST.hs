@@ -81,7 +81,9 @@ pandocToRST (Pandoc meta blocks) = do
                 (fmap (render colwidth) . blockListToRST)
                 (fmap (trimr . render colwidth) . inlineListToRST)
                 $ deleteMeta "title" $ deleteMeta "subtitle" meta
-  body <- blockListToRST' True $ normalizeHeadings 1 blocks
+  body <- blockListToRST' True $ if writerStandalone opts
+                                    then normalizeHeadings 1 blocks
+                                    else blocks
   notes <- liftM (reverse . stNotes) get >>= notesToRST
   -- note that the notes may contain refs, so we do them first
   refs <- liftM (reverse . stLinks) get >>= refsToRST
@@ -101,7 +103,8 @@ pandocToRST (Pandoc meta blocks) = do
      then return $ renderTemplate' (writerTemplate opts) context
      else return main
   where
-    normalizeHeadings lev (Header l a i:bs) = Header lev a i:normalizeHeadings (lev+1) cont ++ normalizeHeadings lev bs'
+    normalizeHeadings lev (Header l a i:bs) =
+      Header lev a i:normalizeHeadings (lev+1) cont ++ normalizeHeadings lev bs'
       where (cont,bs') = break (headerLtEq l) bs
             headerLtEq level (Header l' _ _) = l' <= level
             headerLtEq _ _ = False
@@ -333,7 +336,8 @@ blockListToRST = blockListToRST' False
 -- | Convert list of Pandoc inline elements to RST.
 inlineListToRST :: [Inline] -> State WriterState Doc
 inlineListToRST lst =
-  mapM inlineToRST (removeSpaceAfterDisplayMath $ insertBS lst) >>= return . hcat
+  mapM inlineToRST (removeSpaceAfterDisplayMath $ insertBS lst) >>=
+    return . hcat
   where -- remove spaces after displaymath, as they screw up indentation:
         removeSpaceAfterDisplayMath (Math DisplayMath x : zs) =
               Math DisplayMath x : dropWhile (==Space) zs
@@ -341,8 +345,8 @@ inlineListToRST lst =
         removeSpaceAfterDisplayMath [] = []
         insertBS :: [Inline] -> [Inline] -- insert '\ ' where needed
         insertBS (x:y:z:zs)
-          | isComplex y && surroundComplex x z =
-             x : y : RawInline "rst" "\\ " : insertBS (z:zs)
+          | isComplex y && (surroundComplex x z) =
+              x : y : insertBS (z : zs)
         insertBS (x:y:zs)
           | isComplex x && not (okAfterComplex y) =
               x : RawInline "rst" "\\ " : insertBS (y : zs)
@@ -383,6 +387,8 @@ inlineListToRST lst =
         isComplex (Image _ _) = True
         isComplex (Code _ _) = True
         isComplex (Math _ _) = True
+        isComplex (Cite _ (x:_)) = isComplex x
+        isComplex (Span _ (x:_)) = isComplex x
         isComplex _ = False
 
 -- | Convert Pandoc inline element to RST.

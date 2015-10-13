@@ -9,7 +9,6 @@
 \else % if luatex or xelatex
   \ifxetex
     \usepackage{mathspec}
-    \usepackage{xltxtra,xunicode}
   \else
     \usepackage{fontspec}
   \fi
@@ -23,6 +22,8 @@
 \usepackage{microtype}
 \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
 }{}
+\makeatletter
+\@ifpackageloaded{hyperref}{}{%
 \ifxetex
   \usepackage[setpagesize=false, % page size defined by xetex
               unicode=false, % unicode breaks when used with xetex
@@ -30,7 +31,13 @@
 \else
   \usepackage[unicode=true]{hyperref}
 \fi
-\usepackage[usenames,dvipsnames]{color}
+}
+\@ifpackageloaded{color}{
+    \PassOptionsToPackage{usenames,dvipsnames}{color}
+}{%
+    \usepackage[usenames,dvipsnames]{color}
+}
+\makeatother
 \hypersetup{breaklinks=true,
             bookmarks=true,
             pdfauthor={John MacFarlane; Anonymous},

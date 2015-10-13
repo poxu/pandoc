@@ -80,16 +80,21 @@ pandocToConTeXt options (Pandoc meta blocks) = do
                         "subsubsubsection","subsubsubsubsection"])
                 $ defField "body" main
                 $ defField "number-sections" (writerNumberSections options)
-                $ defField "mainlang" (maybe ""
-                    (reverse . takeWhile (/=',') . reverse)
-                    (lookup "lang" $ writerVariables options))
                 $ metadata
+  let context' =  defField "context-lang" (maybe "" (fromBcp47 . splitBy (=='-')) $
+                    getField "lang" context)
+                $ defField "context-dir" (toContextDir $ getField "dir" context)
+                $ context
   return $ if writerStandalone options
-              then renderTemplate' (writerTemplate options) context
+              then renderTemplate' (writerTemplate options) context'
               else main
 
--- escape things as needed for ConTeXt
+toContextDir :: Maybe String -> String
+toContextDir (Just "rtl") = "r2l"
+toContextDir (Just "ltr") = "l2r"
+toContextDir _            = ""
 
+-- | escape things as needed for ConTeXt
 escapeCharForConTeXt :: WriterOptions -> Char -> String
 escapeCharForConTeXt opts ch =
  let ligatures = writerTeXLigatures opts in
@@ -151,13 +156,18 @@ blockToConTeXt (CodeBlock _ str) =
   -- blankline because \stoptyping can't have anything after it, inc. '}'
 blockToConTeXt (RawBlock "context" str) = return $ text str <> blankline
 blockToConTeXt (RawBlock _ _ ) = return empty
-blockToConTeXt (Div (ident,_,_) bs) = do
+blockToConTeXt (Div (ident,_,kvs) bs) = do
   contents <- blockListToConTeXt bs
-  if null ident
-     then return contents
-     else return $
-          ("\\reference" <> brackets (text $ toLabel ident) <> braces empty <>
-            "%") $$ contents
+  let contents' = if null ident
+                     then contents
+                     else ("\\reference" <> brackets (text $ toLabel ident) <>
+                            braces empty <> "%") $$ contents
+  let align dir = blankline <> "\\startalignment[" <> dir <> "]"
+                    $$ contents' $$ "\\stopalignment" <> blankline
+  return $ case lookup "dir" kvs of
+             Just "rtl" -> align "righttoleft"
+             Just "ltr" -> align "lefttoright"
+             _          -> contents'
 blockToConTeXt (BulletList lst) = do
   contents <- mapM listItemToConTeXt lst
   return $ ("\\startitemize" <> if isTightList lst
@@ -335,7 +345,12 @@ inlineToConTeXt (Note contents) = do
               then text "\\footnote{" <> nest 2 contents' <> char '}'
               else text "\\startbuffer " <> nest 2 contents' <>
                    text "\\stopbuffer\\footnote{\\getbuffer}"
-inlineToConTeXt (Span _ ils) = inlineListToConTeXt ils
+inlineToConTeXt (Span (_,_,kvs) ils) = do
+  contents <- inlineListToConTeXt ils
+  return $ case lookup "dir" kvs of
+             Just "rtl" -> braces $ "\\righttoleft " <> contents
+             Just "ltr" -> braces $ "\\lefttoright " <> contents
+             _          -> contents
 
 -- | Craft the section header, inserting the secton reference, if supplied.
 sectionHeader :: Attr
@@ -361,4 +376,36 @@ sectionHeader (ident,classes,_) hdrLevel lst = do
                else if level' == 0
                        then char '\\' <> chapter <> braces contents
                        else contents <> blankline
+
+-- Takes a list of the constituents of a BCP 47 language code
+-- and irons out ConTeXt's exceptions
+-- https://tools.ietf.org/html/bcp47#section-2.1
+-- http://wiki.contextgarden.net/Language_Codes
+fromBcp47 :: [String] -> String
+fromBcp47 []              = ""
+fromBcp47 ("ar":"SY":_)   = "ar-sy"
+fromBcp47 ("ar":"IQ":_)   = "ar-iq"
+fromBcp47 ("ar":"JO":_)   = "ar-jo"
+fromBcp47 ("ar":"LB":_)   = "ar-lb"
+fromBcp47 ("ar":"DZ":_)   = "ar-dz"
+fromBcp47 ("ar":"MA":_)   = "ar-ma"
+fromBcp47 ("de":"1901":_) = "deo"
+fromBcp47 ("de":"DE":_)   = "de-de"
+fromBcp47 ("de":"AT":_)   = "de-at"
+fromBcp47 ("de":"CH":_)   = "de-ch"
+fromBcp47 ("el":"poly":_) = "agr"
+fromBcp47 ("en":"US":_)   = "en-us"
+fromBcp47 ("en":"GB":_)   = "en-gb"
+fromBcp47 ("grc":_)       = "agr"
+fromBcp47 x               = fromIso $ head x
+  where
+    fromIso "cz" = "cs"
+    fromIso "el" = "gr"
+    fromIso "eu" = "ba"
+    fromIso "he" = "il"
+    fromIso "jp" = "ja"
+    fromIso "uk" = "ua"
+    fromIso "vi" = "vn"
+    fromIso "zh" = "cn"
+    fromIso l    = l
 

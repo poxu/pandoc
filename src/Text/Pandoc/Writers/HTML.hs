@@ -448,19 +448,24 @@ blockToHtml opts (Para [Image txt (s,'f':'i':'g':':':tit)]) = do
 blockToHtml opts (Para lst) = do
   contents <- inlineListToHtml opts lst
   return $ H.p contents
-blockToHtml opts (Div attr@(_,classes,_) bs) = do
+blockToHtml opts (Div attr@(ident, classes, kvs) bs) = do
   let speakerNotes = "notes" `elem` classes
   -- we don't want incremental output inside speaker notes, see #1394
   let opts' = if speakerNotes then opts{ writerIncremental = False } else opts
   contents <- blockListToHtml opts' bs
   let contents' = nl opts >> contents >> nl opts
+  let (divtag, classes') = if writerHtml5 opts && "section" `elem` classes
+                              then (H5.section, filter (/= "section") classes)
+                              else (H.div, classes)
   return $
      if speakerNotes
         then case writerSlideVariant opts of
                   RevealJsSlides -> addAttrs opts' attr $ H5.aside $ contents'
+                  DZSlides       -> (addAttrs opts' attr $ H5.div $ contents')
+                                      ! (H5.customAttribute "role" "note")
                   NoSlides       -> addAttrs opts' attr $ H.div $ contents'
                   _              -> mempty
-        else addAttrs opts attr $ H.div $ contents'
+        else addAttrs opts (ident, classes', kvs) $ divtag $ contents'
 blockToHtml opts (RawBlock f str)
   | f == Format "html" = return $ preEscapedString str
   | f == Format "latex" =

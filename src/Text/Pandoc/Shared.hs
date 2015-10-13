@@ -92,7 +92,9 @@ module Text.Pandoc.Shared (
                      -- * Safe read
                      safeRead,
                      -- * Temp directory
-                     withTempDir
+                     withTempDir,
+                     -- * Version
+                     pandocVersion
                     ) where
 
 import Text.Pandoc.Definition
@@ -106,12 +108,14 @@ import System.Exit (exitWith, ExitCode(..))
 import Data.Char ( toLower, isLower, isUpper, isAlpha,
                    isLetter, isDigit, isSpace )
 import Data.List ( find, stripPrefix, intercalate )
+import Data.Version ( showVersion )
 import qualified Data.Map as M
 import Network.URI ( escapeURIString, isURI, nonStrictRelativeTo,
                      unEscapeString, parseURIReference, isAllowedInURI )
 import qualified Data.Set as Set
 import System.Directory
-import System.FilePath (joinPath, splitDirectories, pathSeparator, isPathSeparator)
+import System.FilePath (splitDirectories, isPathSeparator)
+import qualified System.FilePath.Posix as Posix
 import Text.Pandoc.MIME (MimeType, getMimeType)
 import System.FilePath ( (</>), takeExtension, dropExtension)
 import Data.Generics (Typeable, Data)
@@ -135,6 +139,9 @@ import Data.Sequence (ViewR(..), ViewL(..), viewl, viewr)
 import qualified Data.Text as T (toUpper, pack, unpack)
 import Data.ByteString.Lazy (toChunks, fromChunks)
 import qualified Data.ByteString.Lazy as BL
+import Paths_pandoc (version)
+
+import Codec.Archive.Zip
 
 #ifdef EMBED_DATA_FILES
 import Text.Pandoc.Data (dataFiles)
@@ -142,21 +149,29 @@ import Text.Pandoc.Data (dataFiles)
 import Paths_pandoc (getDataFileName)
 #endif
 #ifdef HTTP_CLIENT
-import Network.HTTP.Client (httpLbs, parseUrl, withManager,
+import Network.HTTP.Client (httpLbs, parseUrl,
                             responseBody, responseHeaders,
                             Request(port,host))
+#if MIN_VERSION_http_client(0,4,18)
+import Network.HTTP.Client (newManager)
+#else
+import Network.HTTP.Client (withManager)
+#endif
 import Network.HTTP.Client.Internal (addProxy)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import System.Environment (getEnv)
 import Network.HTTP.Types.Header ( hContentType)
 import Network (withSocketsDo)
-import Codec.Archive.Zip
 #else
 import Network.URI (parseURI)
 import Network.HTTP (findHeader, rspBody,
                      RequestMethod(..), HeaderName(..), mkRequest)
 import Network.Browser (browse, setAllowRedirects, setOutHandler, request)
 #endif
+
+-- | Version number of pandoc library.
+pandocVersion :: String
+pandocVersion = showVersion version
 
 --
 -- List processing
@@ -273,9 +288,12 @@ toRomanNumeral x =
               _ | x >= 1    -> "I" ++ toRomanNumeral (x - 1)
               _             -> ""
 
--- | Escape whitespace in URI.
+-- | Escape whitespace and some punctuation characters in URI.
 escapeURI :: String -> String
-escapeURI = escapeURIString (not . isSpace)
+escapeURI = escapeURIString (not . needsEscaping)
+  where needsEscaping c = isSpace c || c `elem`
+                           ['<','>','|','"','{','}','[',']','^', '`']
+
 
 -- | Convert tabs to spaces and filter out DOS line endings.
 -- Tabs will be preserved if tab stop is set to 0.
@@ -534,6 +552,7 @@ stringify = query go . walk deNote
         go (Str x) = x
         go (Code _ x) = x
         go (Math _ x) = x
+        go (RawInline (Format "html") ('<':'b':'r':_)) = " " -- see #2105
         go LineBreak = " "
         go _ = ""
         deNote (Note _) = Str ""
@@ -662,27 +681,32 @@ hierarchicalizeWithIds ((Header level attr@(_,classes,_) title'):xs) = do
   sectionContents' <- hierarchicalizeWithIds sectionContents
   rest' <- hierarchicalizeWithIds rest
   return $ Sec level newnum attr title' sectionContents' : rest'
+hierarchicalizeWithIds ((Div ("",["references"],[])
+                         (Header level (ident,classes,kvs) title' : xs)):ys) =
+  hierarchicalizeWithIds ((Header level (ident,("references":classes),kvs)
+                           title') : (xs ++ ys))
 hierarchicalizeWithIds (x:rest) = do
   rest' <- hierarchicalizeWithIds rest
   return $ (Blk x) : rest'
 
 headerLtEq :: Int -> Block -> Bool
 headerLtEq level (Header l _ _) = l <= level
+headerLtEq level (Div ("",["references"],[]) (Header l _ _ : _))  = l <= level
 headerLtEq _ _ = False
 
 -- | Generate a unique identifier from a list of inlines.
 -- Second argument is a list of already used identifiers.
 uniqueIdent :: [Inline] -> [String] -> String
-uniqueIdent title' usedIdents =
-  let baseIdent = case inlineListToIdentifier title' of
+uniqueIdent title' usedIdents
+  =  let baseIdent = case inlineListToIdentifier title' of
                         ""   -> "section"
                         x    -> x
-      numIdent n = baseIdent ++ "-" ++ show n
-  in  if baseIdent `elem` usedIdents
-        then case find (\x -> numIdent x `notElem` usedIdents) ([1..60000] :: [Int]) of
+         numIdent n = baseIdent ++ "-" ++ show n
+     in  if baseIdent `elem` usedIdents
+           then case find (\x -> numIdent x `notElem` usedIdents) ([1..60000] :: [Int]) of
                   Just x  -> numIdent x
                   Nothing -> baseIdent   -- if we have more than 60,000, allow repeats
-        else baseIdent
+           else baseIdent
 
 -- | True if block is a Header block.
 isHeaderBlock :: Block -> Bool
@@ -820,7 +844,7 @@ readDefaultDataFile fname =
   case lookup (makeCanonical fname) dataFiles of
     Nothing       -> err 97 $ "Could not find data file " ++ fname
     Just contents -> return contents
-  where makeCanonical = joinPath . transformPathParts . splitDirectories
+  where makeCanonical = Posix.joinPath . transformPathParts . splitDirectories
         transformPathParts = reverse . foldl go []
         go as     "."  = as
         go (_:as) ".." = as
@@ -900,7 +924,11 @@ openURL u
                      Right pr -> case parseUrl pr of
                                       Just r  -> addProxy (host r) (port r) req
                                       Nothing -> req
+#if MIN_VERSION_http_client(0,4,18)
+     resp <- newManager tlsManagerSettings >>= httpLbs req'
+#else
      resp <- withManager tlsManagerSettings $ httpLbs req'
+#endif
      return (BS.concat $ toChunks $ responseBody resp,
              UTF8.toString `fmap` lookup hContentType (responseHeaders resp))
 #else
@@ -951,14 +979,14 @@ hush (Right x) = Just x
 -- > collapseFilePath "parent/foo/.." ==  "parent"
 -- > collapseFilePath "/parent/foo/../../bar" ==  "/bar"
 collapseFilePath :: FilePath -> FilePath
-collapseFilePath = joinPath . reverse . foldl go [] . splitDirectories
+collapseFilePath = Posix.joinPath . reverse . foldl go [] . splitDirectories
   where
     go rs "." = rs
     go r@(p:rs) ".." = case p of
                             ".." -> ("..":r)
                             (checkPathSeperator -> Just True) -> ("..":r)
                             _ -> rs
-    go _ (checkPathSeperator -> Just True) = [[pathSeparator]]
+    go _ (checkPathSeperator -> Just True) = [[Posix.pathSeparator]]
     go rs x = x:rs
     isSingleton [] = Nothing
     isSingleton [x] = Just x

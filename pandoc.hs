@@ -71,7 +71,8 @@ import qualified Data.Text as T
 import Control.Applicative ((<$>), (<|>))
 import Text.Pandoc.Readers.Txt2Tags (getT2TMeta)
 import Data.Monoid
-
+import Paths_pandoc (getDataDir)
+import Text.Printf (printf)
 import Text.Pandoc.Error
 
 type Transform = Pandoc -> Pandoc
@@ -844,7 +845,7 @@ options =
                   (\arg opt ->
                       return opt
                         { optKaTeXJS =
-                           arg <|> Just "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.1.0/katex.min.js"})
+                           arg <|> Just "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.5.1/katex.min.js"})
                   "URL")
                   "" -- Use KaTeX for HTML Math
 
@@ -879,6 +880,22 @@ options =
                  (NoArg
                   (\opt -> return opt { optVerbose = True }))
                  "" -- "Verbose diagnostic output."
+
+    , Option "" ["bash-completion"]
+                 (NoArg
+                  (\_ -> do
+                     ddir <- getDataDir
+                     tpl <- readDataFileUTF8 Nothing "bash_completion.tpl"
+                     let optnames (Option shorts longs _ _) =
+                           map (\c -> ['-',c]) shorts ++
+                           map ("--" ++) longs
+                     let allopts = unwords (concatMap optnames options)
+                     UTF8.hPutStrLn stdout $ printf tpl allopts
+                         (unwords (map fst readers))
+                         (unwords ("pdf": map fst writers))
+                         ddir
+                     exitWith ExitSuccess ))
+                 "" -- "Print bash completion script"
 
     , Option "v" ["version"]
                  (NoArg
@@ -954,7 +971,7 @@ defaultReaderName fallback (x:xs) =
     ".docx"     -> "docx"
     ".t2t"      -> "t2t"
     ".epub"     -> "epub"
-    ".odt"      -> "odt"  -- so we get an "unknown reader" error
+    ".odt"      -> "odt"
     ".pdf"      -> "pdf"  -- so we get an "unknown reader" error
     ".doc"      -> "doc"  -- so we get an "unknown reader" error
     _           -> defaultReaderName fallback xs
@@ -1115,7 +1132,7 @@ main = do
        mapM_ (\arg -> UTF8.hPutStrLn stdout arg) args
        exitWith ExitSuccess
 
-  let csscdn = "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.1.0/katex.min.css"
+  let csscdn = "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.5.1/katex.min.css"
   let mathMethod =
         case (katexJS, katexStylesheet) of
             (Nothing, _) -> mathMethod'
@@ -1180,8 +1197,6 @@ main = do
                 Right r  -> return r
                 Left e   -> err 7 e'
                   where e' = case readerName' of
-                                  "odt" -> e ++
-                                    "\nPandoc can convert to ODT, but not from ODT.\nTry using LibreOffice to export as HTML, and convert that with pandoc."
                                   "pdf" -> e ++
                                      "\nPandoc can convert to PDF, but not from PDF."
                                   "doc" -> e ++
