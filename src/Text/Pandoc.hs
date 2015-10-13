@@ -96,6 +96,8 @@ module Text.Pandoc
                , writeTexinfo
                , writeHtml
                , writeHtmlString
+               , writeHabr
+               , writeHabrString
                , writeICML
                , writeDocbook
                , writeOPML
@@ -150,6 +152,7 @@ import Text.Pandoc.Writers.LaTeX
 import Text.Pandoc.Writers.ConTeXt
 import Text.Pandoc.Writers.Texinfo
 import Text.Pandoc.Writers.HTML
+import Text.Pandoc.Writers.Habr
 import Text.Pandoc.Writers.ODT
 import Text.Pandoc.Writers.Docx
 import Text.Pandoc.Writers.EPUB
@@ -270,6 +273,7 @@ writers = [
   ,("html"         , PureStringWriter writeHtmlString)
   ,("html5"        , PureStringWriter $ \o ->
      writeHtmlString o{ writerHtml5 = True })
+  ,("habr"         , PureStringWriter writeHabrString)
   ,("icml"         , PureStringWriter writeICML)
   ,("s5"           , PureStringWriter $ \o ->
      writeHtmlString o{ writerSlideVariant = S5Slides
